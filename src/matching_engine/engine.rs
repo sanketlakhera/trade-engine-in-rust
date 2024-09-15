@@ -1,6 +1,6 @@
 use rust_decimal::Decimal;
-
 use super::orderbook::{Order, Orderbook};
+use super::errors::{MatchingEngineError, MatchingEngineResult};
 use std::collections::HashMap;
 // BTC/USD => BTC = BASE AND USD = QUOTE
 #[derive(Debug, Eq, PartialEq, Hash, Clone)]
@@ -40,17 +40,14 @@ impl MatchingEngine {
         pair: TradingPair,
         price: Decimal,
         order: Order,
-    ) -> Result<(), String> {
+    ) -> MatchingEngineResult<()> {
         match self.orderbooks.get_mut(&pair) {
             Some(orderbook) => {
-                orderbook.add_limit_order(price, order);
+                orderbook.add_limit_order(price, order)?;
                 println!("Placed limit order at price level {}", price);
                 Ok(())
             }
-            None => Err(format!(
-                "The orderbook for the given trading pair ({}) does not exist",
-                pair.to_string()
-            )),
+            None => Err(MatchingEngineError::OrderbookNotFound(pair.to_string())),
         }
     }
 }

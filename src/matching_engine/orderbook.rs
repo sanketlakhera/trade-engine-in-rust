@@ -1,6 +1,7 @@
 #![allow(dead_code)]
 use rust_decimal::prelude::*;
 use std::collections::HashMap;
+use super::errors::{MatchingEngineError, MatchingEngineResult};
 
 #[derive(Debug)]
 pub enum BidOrAsk {
@@ -22,8 +23,7 @@ impl Orderbook {
         }
     }
 
-    pub fn fill_market_order(&mut self, market_order: &mut Order) {
-        //need to return vec of matches
+    pub fn fill_market_order(&mut self, market_order: &mut Order) -> MatchingEngineResult<()> {
         let limits = match market_order.bid_or_ask {
             BidOrAsk::Bid => self.ask_limits(),
             BidOrAsk::Ask => self.bid_limits(),
@@ -33,9 +33,15 @@ impl Orderbook {
             limit_order.fill_order(market_order);
 
             if market_order.is_filled() {
-                break;
+                return Ok(());
             }
         }
+
+        if !market_order.is_filled() {
+            return Err(MatchingEngineError::InsufficientLiquidity);
+        }
+
+        Ok(())
     }
 
     // BID (BUY ORDER) => ASKS limits => sorted cheapest price
@@ -56,25 +62,21 @@ impl Orderbook {
         limits
     }
 
-    pub fn add_limit_order(&mut self, price: Decimal, order: Order) {
+    pub fn add_limit_order(&mut self, price: Decimal, order: Order) -> MatchingEngineResult<()> {
+        if order.size <= 0.0 {
+            return Err(MatchingEngineError::InvalidOrder);
+        }
+
         match order.bid_or_ask {
-            BidOrAsk::Bid => match self.bids.get_mut(&price) {
-                Some(limit) => limit.add_order(order),
-                None => {
-                    let mut limit = Limit::new(price);
-                    limit.add_order(order);
-                    self.bids.insert(price, limit);
-                }
+            BidOrAsk::Bid => {
+                self.bids.entry(price).or_insert_with(|| Limit::new(price)).add_order(order);
             },
-            BidOrAsk::Ask => match self.asks.get_mut(&price) {
-                Some(limit) => limit.add_order(order),
-                None => {
-                    let mut limit = Limit::new(price);
-                    limit.add_order(order);
-                    self.asks.insert(price, limit);
-                }
+            BidOrAsk::Ask => {
+                self.asks.entry(price).or_insert_with(|| Limit::new(price)).add_order(order);
             },
         }
+
+        Ok(())
     }
 }
 
@@ -220,3 +222,4 @@ pub mod tests {
         assert_eq!(limit.orders.get(0).unwrap().size, 1.0);
     }
 }
+
