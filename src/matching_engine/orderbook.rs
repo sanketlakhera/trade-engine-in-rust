@@ -1,13 +1,8 @@
 #![allow(dead_code)]
-use rust_decimal::prelude::*;
-use std::collections::HashMap;
 use super::errors::{MatchingEngineError, MatchingEngineResult};
-
-#[derive(Debug)]
-pub enum BidOrAsk {
-    Bid,
-    Ask,
-}
+use super::types::{Order, OrderSide};
+use rust_decimal::Decimal;
+use std::collections::HashMap;
 
 #[derive(Debug)]
 pub struct Orderbook {
@@ -23,67 +18,151 @@ impl Orderbook {
         }
     }
 
-    pub fn fill_market_order(&mut self, market_order: &mut Order) -> MatchingEngineResult<()> {
-        let limits = match market_order.bid_or_ask {
-            BidOrAsk::Bid => self.ask_limits(),
-            BidOrAsk::Ask => self.bid_limits(),
+    pub fn match_order(
+        &mut self,
+        order: &mut Order,
+    ) -> MatchingEngineResult<Vec<(Order, Order, Decimal)>> {
+        let mut trades = Vec::new();
+        let limits = match order.side {
+            OrderSide::Bid => self.ask_limits(),
+            OrderSide::Ask => self.bid_limits(),
         };
 
-        for limit_order in limits {
-            limit_order.fill_order(market_order);
+        for limit_price_level in limits {
+            let orders = &mut limit_price_level.orders;
+            let mut i = 0;
+            while i < orders.len() {
+                let maker_order = &mut orders[i];
+                let trade_size = maker_order.remaining_size().min(order.remaining_size());
 
-            if market_order.is_filled() {
-                return Ok(());
+                if trade_size > Decimal::ZERO {
+                    maker_order.filled_size += trade_size;
+                    order.filled_size += trade_size;
+                    trades.push((maker_order.clone(), order.clone(), limit_price_level.price));
+                }
+
+                if order.is_filled() {
+                    break;
+                }
+                i += 1;
+            }
+
+            // Remove filled orders
+            orders.retain(|o| !o.is_filled());
+
+            if order.is_filled() {
+                break;
             }
         }
 
-        if !market_order.is_filled() {
-            return Err(MatchingEngineError::InsufficientLiquidity);
+        Ok(trades)
+    }
+
+    pub fn can_fill_completely(&self, order: &Order) -> bool {
+        let mut remaining_size = order.size;
+        let limits = match order.side {
+            OrderSide::Bid => self.asks.values().collect::<Vec<&Limit>>(),
+            OrderSide::Ask => self.bids.values().collect::<Vec<&Limit>>(),
+        };
+
+        for limit in limits {
+            for maker_order in &limit.orders {
+                remaining_size -= maker_order.remaining_size();
+                if remaining_size <= Decimal::ZERO {
+                    return true;
+                }
+            }
         }
 
+        false
+    }
+
+    pub fn add_order(&mut self, price: Decimal, order: Order) -> MatchingEngineResult<()> {
+        match order.side {
+            OrderSide::Bid => {
+                self.bids
+                    .entry(price)
+                    .or_insert_with(|| Limit::new(price))
+                    .add_order(order);
+            }
+            OrderSide::Ask => {
+                self.asks
+                    .entry(price)
+                    .or_insert_with(|| Limit::new(price))
+                    .add_order(order);
+            }
+        }
         Ok(())
     }
 
-    // BID (BUY ORDER) => ASKS limits => sorted cheapest price
+    pub fn cancel_order(&mut self, order_id: &str) -> MatchingEngineResult<()> {
+        let mut found = false;
+
+        // Search in bids
+        for limit in self.bids.values_mut() {
+            if limit.cancel_order(order_id) {
+                found = true;
+                break;
+            }
+        }
+
+        // Search in asks if not found in bids
+        if !found {
+            for limit in self.asks.values_mut() {
+                if limit.cancel_order(order_id) {
+                    found = true;
+                    break;
+                }
+            }
+        }
+
+        if found {
+            Ok(())
+        } else {
+            Err(MatchingEngineError::OrderNotFound(order_id.to_string()))
+        }
+    }
+
     pub fn ask_limits(&mut self) -> Vec<&mut Limit> {
         let mut limits = self.asks.values_mut().collect::<Vec<&mut Limit>>();
-
         limits.sort_by(|a, b| a.price.cmp(&b.price));
-
         limits
     }
 
-    // AKS (SELL ORDER) => BIDS limits => sorted highest price
     pub fn bid_limits(&mut self) -> Vec<&mut Limit> {
         let mut limits = self.bids.values_mut().collect::<Vec<&mut Limit>>();
-
         limits.sort_by(|a, b| b.price.cmp(&a.price));
-
         limits
     }
 
-    pub fn add_limit_order(&mut self, price: Decimal, order: Order) -> MatchingEngineResult<()> {
-        if order.size <= 0.0 {
-            return Err(MatchingEngineError::InvalidOrder);
-        }
+    pub fn get_aggregated_levels(
+        &self,
+    ) -> (
+        Vec<(Decimal, Decimal, usize)>,
+        Vec<(Decimal, Decimal, usize)>,
+    ) {
+        let mut bids = self
+            .bids
+            .iter()
+            .map(|(price, limit)| (*price, limit.total_volume(), limit.orders.len()))
+            .collect::<Vec<_>>();
+        bids.sort_by(|a, b| b.0.cmp(&a.0));
 
-        match order.bid_or_ask {
-            BidOrAsk::Bid => {
-                self.bids.entry(price).or_insert_with(|| Limit::new(price)).add_order(order);
-            },
-            BidOrAsk::Ask => {
-                self.asks.entry(price).or_insert_with(|| Limit::new(price)).add_order(order);
-            },
-        }
+        let mut asks = self
+            .asks
+            .iter()
+            .map(|(price, limit)| (*price, limit.total_volume(), limit.orders.len()))
+            .collect::<Vec<_>>();
+        asks.sort_by(|a, b| a.0.cmp(&b.0));
 
-        Ok(())
+        (bids, asks)
     }
 }
 
 #[derive(Debug)]
 pub struct Limit {
-    price: Decimal,
-    orders: Vec<Order>,
+    pub price: Decimal,
+    pub orders: Vec<Order>,
 }
 
 impl Limit {
@@ -94,132 +173,98 @@ impl Limit {
         }
     }
 
-    fn total_volume(&self) -> f64 {
-        return self
-            .orders
-            .iter()
-            .map(|order| order.size)
-            .reduce(|a, b| a + b)
-            .unwrap();
-    }
-
-    fn fill_order(&mut self, market_order: &mut Order) {
-        for limit_order in self.orders.iter_mut() {
-            match market_order.size >= limit_order.size {
-                true => {
-                    market_order.size -= limit_order.size;
-                    limit_order.size = 0.0
-                }
-                false => {
-                    limit_order.size -= market_order.size;
-                    market_order.size = 0.0
-                }
-            }
-
-            if market_order.is_filled() {
-                break;
-            }
-        }
+    fn total_volume(&self) -> Decimal {
+        self.orders.iter().map(|order| order.remaining_size()).sum()
     }
 
     fn add_order(&mut self, order: Order) {
         self.orders.push(order)
     }
-}
-#[derive(Debug)]
-pub struct Order {
-    size: f64,
-    bid_or_ask: BidOrAsk,
-}
 
-impl Order {
-    pub fn new(bid_or_ask: BidOrAsk, size: f64) -> Order {
-        Order { size, bid_or_ask }
-    }
-
-    pub fn is_filled(&self) -> bool {
-        self.size == 0.0
+    fn cancel_order(&mut self, order_id: &str) -> bool {
+        if let Some(pos) = self.orders.iter().position(|o| o.id == order_id) {
+            self.orders.remove(pos);
+            true
+        } else {
+            false
+        }
     }
 }
 
 #[cfg(test)]
 pub mod tests {
+    use super::super::types::{OrderType, TradingPair};
     use super::*;
     use rust_decimal_macros::dec;
 
     #[test]
-    fn orderbook_fill_market_order_asks() {
+    fn test_match_market_order() -> Result<(), Box<dyn std::error::Error>> {
         let mut orderbook = Orderbook::new();
-        orderbook.add_limit_order(dec!(500), Order::new(BidOrAsk::Ask, 10.0));
-        orderbook.add_limit_order(dec!(200), Order::new(BidOrAsk::Ask, 10.0));
-        orderbook.add_limit_order(dec!(100), Order::new(BidOrAsk::Ask, 10.0));
-        orderbook.add_limit_order(dec!(300), Order::new(BidOrAsk::Ask, 10.0));
+        let pair = TradingPair::new("BTC", "USD");
 
-        let mut market_order = Order::new(BidOrAsk::Bid, 10.0);
-        orderbook.fill_market_order(&mut market_order);
+        // Add some limit orders
+        let limit_order = Order::new_limit(
+            "order1".to_string(),
+            pair.clone(),
+            OrderSide::Ask,
+            dec!(50000),
+            dec!(1.0),
+            OrderType::GTC,
+        );
+        orderbook.add_order(dec!(50000), limit_order)?;
 
-        let ask_limits = orderbook.ask_limits();
-        let matched_limit = ask_limits.get(0).unwrap(); //.orders.get(0).unwrap();
+        // Create a market buy order
+        let mut market_order =
+            Order::new_market("order2".to_string(), pair, OrderSide::Bid, dec!(0.5));
 
-        assert_eq!(matched_limit.price, dec!(100));
-        assert_eq!(market_order.is_filled(), true);
+        // Match the order
+        let trades = orderbook.match_order(&mut market_order)?;
 
-        let matched_order = matched_limit.orders.get(0).unwrap();
-        assert_eq!(matched_order.is_filled(), true);
+        assert_eq!(trades.len(), 1);
+        assert_eq!(trades[0].2, dec!(50000)); // Price
+        assert_eq!(market_order.filled_size, dec!(0.5));
 
-        // println!("{:?}", orderbook.ask_limits());
+        Ok(())
     }
 
     #[test]
-    fn limit_total_volume() {
-        let price = dec!(10000);
-        let mut limit = Limit::new(price);
-        let buy_limit_order_a = Order::new(BidOrAsk::Bid, 100.0);
-        let buy_limit_order_b = Order::new(BidOrAsk::Bid, 100.0);
+    fn test_can_fill_completely() -> Result<(), Box<dyn std::error::Error>> {
+        let mut orderbook = Orderbook::new();
+        let pair = TradingPair::new("BTC", "USD");
 
-        limit.add_order(buy_limit_order_a);
-        limit.add_order(buy_limit_order_b);
+        // Add a limit order
+        let limit_order = Order::new_limit(
+            "order1".to_string(),
+            pair.clone(),
+            OrderSide::Ask,
+            dec!(50000),
+            dec!(1.0),
+            OrderType::GTC,
+        );
+        orderbook.add_order(dec!(50000), limit_order)?;
 
-        assert_eq!(limit.total_volume(), 200.0);
-    }
+        // Check if we can fill a smaller order
+        let market_order = Order::new_market(
+            "order2".to_string(),
+            pair.clone(),
+            OrderSide::Bid,
+            dec!(0.5),
+        );
+        assert!(orderbook.can_fill_completely(&market_order));
 
-    #[test]
-    fn limit_order_multi_fill() {
-        let price = dec!(10000);
-        let mut limit = Limit::new(price);
+        // Check if we can fill an equal sized order
+        let market_order = Order::new_market(
+            "order3".to_string(),
+            pair.clone(),
+            OrderSide::Bid,
+            dec!(1.0),
+        );
+        assert!(orderbook.can_fill_completely(&market_order));
 
-        let buy_limit_order_a = Order::new(BidOrAsk::Bid, 100.0);
-        let buy_limit_order_b = Order::new(BidOrAsk::Bid, 100.0);
+        // Check if we can fill a larger order
+        let market_order = Order::new_market("order4".to_string(), pair, OrderSide::Bid, dec!(1.5));
+        assert!(!orderbook.can_fill_completely(&market_order));
 
-        limit.add_order(buy_limit_order_a);
-        limit.add_order(buy_limit_order_b);
-
-        let mut market_sell_order = Order::new(BidOrAsk::Ask, 199.0);
-        limit.fill_order(&mut market_sell_order);
-
-        assert_eq!(market_sell_order.is_filled(), true);
-        assert_eq!(limit.orders.get(0).unwrap().is_filled(), true);
-        assert_eq!(limit.orders.get(1).unwrap().is_filled(), false);
-        assert_eq!(limit.orders.get(1).unwrap().size, 1.0);
-        println!("{:?}", limit);
-    }
-
-    #[test]
-    fn limit_order_single_fill() {
-        let price = dec!(10000.0);
-        let mut limit = Limit::new(price);
-
-        let buy_limit_order = Order::new(BidOrAsk::Bid, 100.0);
-
-        limit.add_order(buy_limit_order);
-
-        let mut market_sell_order = Order::new(BidOrAsk::Ask, 99.0);
-        limit.fill_order(&mut market_sell_order);
-
-        println!("{:?}", limit);
-
-        assert_eq!(market_sell_order.is_filled(), true);
-        assert_eq!(limit.orders.get(0).unwrap().size, 1.0);
+        Ok(())
     }
 }
-
