@@ -2,9 +2,27 @@
 name = "trade-engine"
 version = "0.1.0"
 edition = "2021"
+authors = ["Your Name <your.email@example.com>"]
+description = "A high-performance trade matching engine written in Rust"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
-rust_decimal = "1.26"
-rust_decimal_macros = "1.26"
+rust_decimal = "1.32"
+rust_decimal_macros = "1.32"
+uuid = { version = "1.6", features = ["v4"] }
+log = "0.4"
+env_logger = "0.10"
+tokio = { version = "1.35", features = ["full"] }
+crossbeam = "0.8"
+thiserror = "1.0"
+chrono = "0.4"
+
+[dev-dependencies]
+criterion = "0.5"
+mockall = "0.12"
+test-case = "3.3"
+
+[[bench]]
+name = "matching_engine"
+harness = false
