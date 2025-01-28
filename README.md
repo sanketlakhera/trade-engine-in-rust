@@ -1,5 +1,7 @@
 # Trade Engine in Rust
 
+# This is not a real trading engine, it is a side project to learn Rust
+
 ## Overview
 
 This project implements a high-performance trade matching engine in Rust, designed to handle real-time order matching and trade execution. The engine supports both limit and market orders, maintains order books for multiple trading pairs, and implements price-time priority matching.
