@@ -2,19 +2,19 @@
 use super::errors::{MatchingEngineError, MatchingEngineResult};
 use super::types::{Order, OrderSide};
 use rust_decimal::Decimal;
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 
 #[derive(Debug)]
 pub struct Orderbook {
-    asks: HashMap<Decimal, Limit>,
-    bids: HashMap<Decimal, Limit>,
+    asks: BTreeMap<Decimal, Limit>,
+    bids: BTreeMap<Decimal, Limit>,
 }
 
 impl Orderbook {
     pub fn new() -> Orderbook {
         Orderbook {
-            asks: HashMap::new(),
-            bids: HashMap::new(),
+            asks: BTreeMap::new(),
+            bids: BTreeMap::new(),
         }
     }
 
@@ -76,19 +76,32 @@ impl Orderbook {
 
     pub fn can_fill_completely(&self, order: &Order) -> bool {
         let mut remaining_size = order.size;
-        let limits = match order.side {
-            OrderSide::Bid => self.asks.values().collect::<Vec<&Limit>>(),
-            OrderSide::Ask => self.bids.values().collect::<Vec<&Limit>>(),
-        };
-
-        for limit in limits {
-            for maker_order in &limit.orders {
-                remaining_size -= maker_order.remaining_size();
-                if remaining_size <= Decimal::ZERO {
-                    return true;
+        
+        // Iterating over limits in price priority order
+        match order.side {
+            OrderSide::Bid => {
+                // Buying: check asks (lowest price first)
+                for limit in self.asks.values() {
+                    for maker_order in &limit.orders {
+                        remaining_size -= maker_order.remaining_size();
+                        if remaining_size <= Decimal::ZERO {
+                            return true;
+                        }
+                    }
+                }
+            },
+            OrderSide::Ask => {
+                // Selling: check bids (highest price first)
+                for limit in self.bids.values().rev() {
+                    for maker_order in &limit.orders {
+                        remaining_size -= maker_order.remaining_size();
+                        if remaining_size <= Decimal::ZERO {
+                            return true;
+                        }
+                    }
                 }
             }
-        }
+        };
 
         false
     }
@@ -140,15 +153,13 @@ impl Orderbook {
     }
 
     pub fn ask_limits(&mut self) -> Vec<&mut Limit> {
-        let mut limits = self.asks.values_mut().collect::<Vec<&mut Limit>>();
-        limits.sort_by(|a, b| a.price.cmp(&b.price));
-        limits
+        // Asks are sorted ascending by key (price) in BTreeMap
+        self.asks.values_mut().collect()
     }
 
     pub fn bid_limits(&mut self) -> Vec<&mut Limit> {
-        let mut limits = self.bids.values_mut().collect::<Vec<&mut Limit>>();
-        limits.sort_by(|a, b| b.price.cmp(&a.price));
-        limits
+        // Bids need to be sorted descending by price
+        self.bids.values_mut().rev().collect()
     }
 
     pub fn get_aggregated_levels(
@@ -157,19 +168,20 @@ impl Orderbook {
         Vec<(Decimal, Decimal, usize)>,
         Vec<(Decimal, Decimal, usize)>,
     ) {
-        let mut bids = self
+        // Bids: Descending order (highest price first)
+        let bids = self
             .bids
             .iter()
+            .rev()
             .map(|(price, limit)| (*price, limit.total_volume(), limit.orders.len()))
             .collect::<Vec<_>>();
-        bids.sort_by(|a, b| b.0.cmp(&a.0));
 
-        let mut asks = self
+        // Asks: Ascending order (lowest price first)
+        let asks = self
             .asks
             .iter()
             .map(|(price, limit)| (*price, limit.total_volume(), limit.orders.len()))
             .collect::<Vec<_>>();
-        asks.sort_by(|a, b| a.0.cmp(&b.0));
 
         (bids, asks)
     }

@@ -19,7 +19,7 @@ This project implements a high-performance trade matching engine in Rust, design
   - Real-time order book maintenance
   - Price aggregation and level tracking
   - Efficient price-time priority queues
-  - Memory-optimized data structures
+  - BTreeMap-based price levels for efficient ordered access
 
 - **Trading Engine Core**:
   - Multiple trading pair support
