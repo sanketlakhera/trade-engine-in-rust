@@ -1,5 +1,4 @@
-mod matching_engine;
-
+use trade_engine::matching_engine;
 use matching_engine::{MatchingEngine, Order, OrderSide, OrderType, TradingPair};
 use rust_decimal_macros::dec;
 
